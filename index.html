@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MathMate - Ton Tuteur IA Personnel</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.338/pdf.min.js"></script>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        function MathMate() {
+            const [currentView, setCurrentView] = useState('welcome');
+            const [profile, setProfile] = useState(null);
+            const [currentConversation, setCurrentConversation] = useState([]);
+            const [input, setInput] = useState('');
+            const [isLoading, setIsLoading] = useState(false);
+            const [attachedFiles, setAttachedFiles] = useState([]);
+            const chatEndRef = useRef(null);
+            const fileInputRef = useRef(null);
+
+            useEffect(() => {
+                const saved = localStorage.getItem('mathmate-profile');
+                if (saved) {
+                    setProfile(JSON.parse(saved));
+                }
+                chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+            }, [currentConversation]);
+
+            const topics = [
+                'Fonctions (limites, continuité)',
+                'Dérivation',
+                'Suites numériques',
+                'Trigonométrie',
+                'Probabilités',
+                'Géométrie analytique',
+                'Exponentielles et logarithmes',
+                'Intégration',
+                'Nombres complexes'
+            ];
+
+            const handleCreateProfile = (formData) => {
+                const newProfile = {
+                    name: formData.name,
+                    grade: formData.grade,
+                    difficulties: formData.difficulties
+                };
+                setProfile(newProfile);
+                localStorage.setItem('mathmate-profile', JSON.stringify(newProfile));
+                setCurrentView('chat');
+            };
+
+            const handleFileSelect = async (e) => {
+                const files = Array.from(e.target.files);
+                const newFiles = [];
+
+                for (const file of files) {
+                    if (file.type.startsWith('image/')) {
+                        const base64 = await new Promise((resolve) => {
+                            const reader = new FileReader();
+                            reader.onload = () => resolve(reader.result);
+                            reader.readAsDataURL(file);
+                        });
+                        newFiles.push({
+                            name: file.name,
+                            mimeType: file.type,
+                            data: base64
+                        });
+                    } else if (file.type === 'application/pdf') {
+                        const arrayBuffer = await file.arrayBuffer();
+                        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+                        let text = '';
+                        for (let i = 1; i <= Math.min(pdf.numPages, 10); i++) {
+                            const page = await pdf.getPage(i);
+                            const content = await page.getTextContent();
+                            text += content.items.map(item => item.str).join(' ') + '\n';
+                        }
+                        newFiles.push({
+                            name: file.name,
+                            text: text.substring(0, 10000) // Limite
+                        });
+                    }
+                }
+
+                setAttachedFiles([...attachedFiles, ...newFiles]);
+            };
+
+            const removeFile = (index) => {
+                setAttachedFiles(attachedFiles.filter((_, i) => i !== index));
+            };
+
+            const handleSendMessage = async () => {
+                if ((!input.trim() && attachedFiles.length === 0) || isLoading) return;
+
+                const userMessage = {
+                    role: 'user',
+                    content: input,
+                    files: attachedFiles.length > 0 ? [...attachedFiles] : null
+                };
+
+                const updatedConvo = [...currentConversation, userMessage];
+                setCurrentConversation(updatedConvo);
+                setInput('');
+                const filesToSend = [...attachedFiles];
+                setAttachedFiles([]);
+                setIsLoading(true);
+
+                try {
+                    const systemPrompt = `Tu es MathMate, un tuteur de mathématiques patient et encourageant pour lycéens français. Utilise la méthode socratique : pose des questions, décompose, donne des indices, jamais la réponse directe. Tutoie l'élève, utilise des emojis, reste concis (3-5 phrases). Profil élève : classe ${profile.grade}, difficultés : ${profile.difficulties.join(', ')}.`;
+
+                    const contents = [];
+
+                    if (filesToSend.length > 0) {
+                        filesToSend.forEach(file => {
+                            if (file.mimeType) {
+                                contents.push({
+                                    type: "image_url",
+                                    image_url: { url: file.data }
+                                });
+                            } else if (file.text) {
+                                contents.push({
+                                    type: "text",
+                                    text: `Contenu PDF ${file.name}: ${file.text}`
+                                });
+                            }
+                        });
+                    }
+
+                    contents.push({
+                        type: "text",
+                        text: input.trim() || "Analyse ce document et aide-moi."
+                    });
+
+                    const response = await fetch('/api/chat', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            system: systemPrompt,
+                            contents: contents,
+                            history: currentConversation
+                        })
+                    });
+
+                    if (!response.ok) throw new Error(await response.text());
+
+                    const data = await response.json();
+                    const assistantMessage = {
+                        role: 'assistant',
+                        content: data.text
+                    };
+
+                    const finalConvo = [...updatedConvo, assistantMessage];
+                    setCurrentConversation(finalConvo);
+                } catch (error) {
+                    setCurrentConversation([...updatedConvo, {
+                        role: 'assistant',
+                        content: 'Désolé, erreur : ' + error.message + '. Réessaye !'
+                    }]);
+                }
+
+                setIsLoading(false);
+            };
+
+            if (!profile) {
+                return <WelcomeScreen onComplete={handleCreateProfile} topics={topics} />;
+            }
+
+            return (
+                <div className="min-h-screen bg-gradient-to-br from-indigo-50 to-purple-50 p-4">
+                    <div className="max-w-4xl mx-auto bg-white rounded-3xl shadow-2xl overflow-hidden">
+                        <div className="bg-gradient-to-r from-indigo-500 to-purple-600 p-6 text-white">
+                            <h1 className="text-3xl font-bold">Salut {profile.name} ! 👋</h1>
+                            <p>Prêt à comprendre les maths ?</p>
+                        </div>
+
+                        <div className="h-[70vh] flex flex-col">
+                            <div className="flex-1 overflow-y-auto p-6 space-y-4">
+                                {currentConversation.map((msg, i) => (
+                                    <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                        <div className={`max-w-[80%] rounded-2xl px-4 py-3 ${msg.role === 'user' ? 'bg-indigo-600 text-white' : 'bg-gray-100'}`}>
+                                            {msg.files && msg.files.map((f, idx) => <div key={idx} className="text-sm opacity-70">{f.name}</div>)}
+                                            <p className="whitespace-pre-wrap">{msg.content}</p>
+                                        </div>
+                                    </div>
+                                ))}
+                                {isLoading && <div className="flex justify-start">
+                                    <div className="bg-gray-100 rounded-2xl px-4 py-3">...</div>
+                                </div>}
+                                <div ref={chatEndRef} />
+                            </div>
+
+                            <div className="p-6 border-t">
+                                {attachedFiles.length > 0 && (
+                                    <div className="mb-3 flex flex-wrap gap-2">
+                                        {attachedFiles.map((file, idx) => (
+                                            <div key={idx} className="bg-indigo-50 px-3 py-2 rounded-lg flex items-center gap-2">
+                                                <span className="text-sm">{file.name}</span>
+                                                <button onClick={() => removeFile(idx)}>✕</button>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                                <div className="flex gap-3">
+                                    <input ref={fileInputRef} type="file" accept="image/*,.pdf" multiple onChange={handleFileSelect} className="hidden" />
+                                    <button onClick={() => fileInputRef.current?.click()} className="p-3 border rounded-xl">📎</button>
+                                    <input type="text" value={input} onChange={(e) => setInput(e.target.value)} onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()} placeholder="Ta question..." className="flex-1 px-4 py-3 border rounded-xl" />
+                                    <button onClick={handleSendMessage} className="px-6 py-3 bg-indigo-600 text-white rounded-xl">➤</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // WelcomeScreen simple (copie ton ancien ou simplifie)
+        function WelcomeScreen({ onComplete, topics }) {
+            // (Copie ton code WelcomeScreen original pour l'onboarding)
+            // Pour brevité, je le simplifie ici – ajoute le tien si tu veux
+            const [formData, setFormData] = useState({ name: '', grade: 'Seconde', difficulties: [] });
+
+            return (
+                <div className="min-h-screen bg-gradient-to-br from-indigo-600 to-purple-600 flex items-center justify-center p-6">
+                    <div className="bg-white rounded-3xl p-8 max-w-md w-full">
+                        <h1 className="text-3xl font-bold mb-6">Bienvenue sur MathMate !</h1>
+                        <input placeholder="Prénom" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className="w-full p-3 border rounded mb-4" />
+                        <select value={formData.grade} onChange={e => setFormData({...formData, grade: e.target.value})} className="w-full p-3 border rounded mb-4">
+                            <option>Seconde</option>
+                            <option>Première</option>
+                            <option>Terminale</option>
+                        </select>
+                        <div className="mb-6">
+                            <p className="mb-2">Tes difficultés (clique pour sélectionner)</p>
+                            {topics.map(topic => (
+                                <button key={topic} onClick={() => setFormData({...formData, difficulties: formData.difficulties.includes(topic) ? formData.difficulties.filter(t => t !== topic) : [...formData.difficulties, topic]})} className={`block w-full p-3 mb-2 rounded border ${formData.difficulties.includes(topic) ? 'bg-indigo-500 text-white' : 'bg-gray-100'}`}>
+                                    {topic}
+                                </button>
+                            ))}
+                        </div>
+                        <button onClick={() => onComplete(formData)} disabled={!formData.name || formData.difficulties.length === 0} className="w-full bg-indigo-600 text-white py-4 rounded-xl font-bold">
+                            Commencer
+                        </button>
+                    </div>
+                </div>
+            );
+        }
+
+        ReactDOM.render(<MathMate />, document.getElementById('root'));
+    </script>
+</body>
+</html>
